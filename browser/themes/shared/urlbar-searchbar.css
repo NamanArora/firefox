@@ -121,7 +121,7 @@
 
 .urlbar-background,
 #searchbar {
-  background-color: var(--toolbar-field-background-color);
+  background-color: var(--toolbar-bgcolor);
   background-clip: border-box;
   border: 1px solid var(--toolbar-field-border-color);
   border-radius: var(--toolbarbutton-border-radius);
