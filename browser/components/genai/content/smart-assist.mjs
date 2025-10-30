@@ -93,7 +93,10 @@ export class SmartAssist extends MozLitElement {
 
     const gBrowser = window.browsingContext.topChromeWindow.gBrowser;
     if (gBrowser?.tabContainer) {
-      gBrowser.tabContainer.addEventListener("TabSelect", this._tabSelectListener);
+      gBrowser.tabContainer.addEventListener(
+        "TabSelect",
+        this._tabSelectListener
+      );
     }
 
     if (this.mode === "sidebar" && this.overrideNewTab) {
@@ -116,7 +119,10 @@ export class SmartAssist extends MozLitElement {
     if (this._tabSelectListener) {
       const gBrowser = window.browsingContext.topChromeWindow.gBrowser;
       if (gBrowser?.tabContainer) {
-        gBrowser.tabContainer.removeEventListener("TabSelect", this._tabSelectListener);
+        gBrowser.tabContainer.removeEventListener(
+          "TabSelect",
+          this._tabSelectListener
+        );
       }
       this._tabSelectListener = null;
     }
@@ -149,7 +155,10 @@ export class SmartAssist extends MozLitElement {
     this.conversationState = conversation || [];
 
     // Subscribe to stream updates for this browser
-    lazy.SmartAssistEngine.addStreamObserver(browser, this._handleStreamUpdate.bind(this));
+    lazy.SmartAssistEngine.addStreamObserver(
+      browser,
+      this._handleStreamUpdate.bind(this)
+    );
 
     // Check if currently streaming
     this._isStreaming = lazy.SmartAssistEngine.isStreaming(browser);
@@ -170,12 +179,15 @@ export class SmartAssist extends MozLitElement {
     }
 
     switch (update.type) {
-      case "text":
+      case "text": {
         // Reload conversation to get updated content
-        const conversation = lazy.SmartAssistEngine.getConversation(this._currentBrowser);
+        const conversation = lazy.SmartAssistEngine.getConversation(
+          this._currentBrowser
+        );
         this.conversationState = conversation || [];
         this.requestUpdate?.();
         break;
+      }
 
       case "tool_call":
         // Add tool call to log
@@ -187,13 +199,16 @@ export class SmartAssist extends MozLitElement {
         }
         break;
 
-      case "complete":
+      case "complete": {
         this._isStreaming = false;
         // Final reload to ensure we have complete conversation
-        const finalConversation = lazy.SmartAssistEngine.getConversation(this._currentBrowser);
+        const finalConversation = lazy.SmartAssistEngine.getConversation(
+          this._currentBrowser
+        );
         this.conversationState = finalConversation || [];
         this.requestUpdate?.();
         break;
+      }
 
       case "error":
         this._isStreaming = false;
@@ -311,7 +326,9 @@ export class SmartAssist extends MozLitElement {
       );
 
       // Immediately reload conversation to show user message
-      const conversation = lazy.SmartAssistEngine.getConversation(this._currentBrowser);
+      const conversation = lazy.SmartAssistEngine.getConversation(
+        this._currentBrowser
+      );
       this.conversationState = conversation || [];
       this.requestUpdate?.();
     } catch (error) {
