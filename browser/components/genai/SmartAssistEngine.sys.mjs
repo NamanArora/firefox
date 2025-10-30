@@ -139,8 +139,13 @@ const search_open_tabs = ({ type }) => {
  */
 const click_element = async ({ selector }) => {
   try {
-    let win = lazy.BrowserWindowTracker.getTopWindow();
-    let browser = win.gBrowser.selectedBrowser;
+    // Use browser from conversation context (correct tab)
+    let browser = SmartAssistEngine._currentBrowser;
+    if (!browser) {
+      // Fallback to selected browser for direct calls
+      let win = lazy.BrowserWindowTracker.getTopWindow();
+      browser = win.gBrowser.selectedBrowser;
+    }
 
     // Send message to content process to perform click
     const result = await browser.browsingContext?.currentWindowContext
@@ -163,8 +168,13 @@ const click_element = async ({ selector }) => {
  */
 const get_page_forms = async () => {
   try {
-    let win = lazy.BrowserWindowTracker.getTopWindow();
-    let browser = win.gBrowser.selectedBrowser;
+    // Use browser from conversation context (correct tab)
+    let browser = SmartAssistEngine._currentBrowser;
+    if (!browser) {
+      // Fallback to selected browser for direct calls
+      let win = lazy.BrowserWindowTracker.getTopWindow();
+      browser = win.gBrowser.selectedBrowser;
+    }
 
     // Send message to content process to get forms data
     const result = await browser.browsingContext?.currentWindowContext
@@ -190,8 +200,13 @@ const get_page_forms = async () => {
  */
 const fill_input = async ({ selector, value }) => {
   try {
-    let win = lazy.BrowserWindowTracker.getTopWindow();
-    let browser = win.gBrowser.selectedBrowser;
+    // Use browser from conversation context (correct tab)
+    let browser = SmartAssistEngine._currentBrowser;
+    if (!browser) {
+      // Fallback to selected browser for direct calls
+      let win = lazy.BrowserWindowTracker.getTopWindow();
+      browser = win.gBrowser.selectedBrowser;
+    }
 
     // Send message to content process to fill input
     const result = await browser.browsingContext?.currentWindowContext
@@ -215,8 +230,13 @@ const fill_input = async ({ selector, value }) => {
  */
 const navigate_to_url = ({ url }) => {
   try {
-    let win = lazy.BrowserWindowTracker.getTopWindow();
-    let browser = win.gBrowser.selectedBrowser;
+    // Use browser from conversation context (correct tab)
+    let browser = SmartAssistEngine._currentBrowser;
+    if (!browser) {
+      // Fallback to selected browser for direct calls
+      let win = lazy.BrowserWindowTracker.getTopWindow();
+      browser = win.gBrowser.selectedBrowser;
+    }
 
     // Use Firefox's built-in URL fixup to handle partial URLs
     let fixupInfo;
@@ -254,6 +274,176 @@ const navigate_to_url = ({ url }) => {
       error: `Failed to navigate: ${error.message}`,
     };
   }
+};
+
+/**
+ * Per-tab conversation manager
+ * Stores conversation history keyed by browser.permanentKey
+ */
+const ConversationManager = {
+  conversations: new Map(),
+
+  getConversation(browser) {
+    const key = browser.permanentKey || browser;
+    if (!this.conversations.has(key)) {
+      this.conversations.set(key, [
+        { role: "system", content: "You are a helpful assistant" },
+      ]);
+    }
+    return this.conversations.get(key);
+  },
+
+  updateConversation(browser, messages) {
+    const key = browser.permanentKey || browser;
+    this.conversations.set(key, messages);
+  },
+
+  appendMessage(browser, message) {
+    const conversation = this.getConversation(browser);
+    conversation.push(message);
+    this.updateConversation(browser, conversation);
+  },
+
+  clearConversation(browser) {
+    const key = browser.permanentKey || browser;
+    this.conversations.delete(key);
+  },
+};
+
+/**
+ * Background streaming manager
+ * Handles streaming in background even when tabs switch
+ */
+const StreamManager = {
+  activeStreams: new Map(),
+  observers: new Map(),
+
+  async startStream(browser, userMessage) {
+    const key = browser.permanentKey || browser;
+
+    // Add user message to conversation
+    ConversationManager.appendMessage(browser, {
+      role: "user",
+      content: userMessage,
+    });
+
+    // Get conversation history
+    const messages = ConversationManager.getConversation(browser);
+
+    // Mark stream as active
+    this.activeStreams.set(key, {
+      status: "streaming",
+      browser,
+      startTime: Date.now(),
+    });
+
+    // Start streaming in background (non-blocking)
+    this._consumeStream(browser, messages);
+
+    return { success: true, streaming: true };
+  },
+
+  async _consumeStream(browser, messages) {
+    const key = browser.permanentKey || browser;
+    let assistantMessage = { role: "assistant", content: "" };
+
+    try {
+      // Store browser reference for tools
+      SmartAssistEngine._currentBrowser = browser;
+
+      // Start streaming
+      const stream = SmartAssistEngine.fetchWithHistory(messages);
+
+      for await (const chunk of stream) {
+        // Check if stream was cancelled
+        const streamInfo = this.activeStreams.get(key);
+        if (!streamInfo || streamInfo.status === "cancelled") {
+          break;
+        }
+
+        // Accumulate text chunks
+        if (chunk?.text) {
+          assistantMessage.content += chunk.text;
+
+          // Notify observer (UI) with incremental update
+          this.notifyUpdate(browser, {
+            type: "text",
+            text: chunk.text,
+            fullMessage: assistantMessage.content,
+          });
+        }
+
+        // Handle tool calls
+        if (chunk?.type === "tool_call_log") {
+          ConversationManager.appendMessage(browser, chunk);
+          this.notifyUpdate(browser, {
+            type: "tool_call",
+            data: chunk,
+          });
+        }
+      }
+
+      // Stream complete - save final assistant message
+      if (assistantMessage.content) {
+        ConversationManager.appendMessage(browser, assistantMessage);
+      }
+
+      // Mark as complete
+      const streamInfo = this.activeStreams.get(key);
+      if (streamInfo) {
+        streamInfo.status = "complete";
+      }
+
+      this.notifyUpdate(browser, { type: "complete" });
+    } catch (error) {
+      console.error("Stream error:", error);
+      const streamInfo = this.activeStreams.get(key);
+      if (streamInfo) {
+        streamInfo.status = "error";
+        streamInfo.error = error.message;
+      }
+      this.notifyUpdate(browser, {
+        type: "error",
+        error: error.message,
+      });
+    }
+  },
+
+  addObserver(browser, callback) {
+    const key = browser.permanentKey || browser;
+    this.observers.set(key, callback);
+  },
+
+  removeObserver(browser) {
+    const key = browser.permanentKey || browser;
+    this.observers.delete(key);
+  },
+
+  notifyUpdate(browser, update) {
+    const key = browser.permanentKey || browser;
+    const callback = this.observers.get(key);
+    if (callback) {
+      try {
+        callback(update);
+      } catch (error) {
+        console.error("Observer callback error:", error);
+      }
+    }
+  },
+
+  cancelStream(browser) {
+    const key = browser.permanentKey || browser;
+    const streamInfo = this.activeStreams.get(key);
+    if (streamInfo) {
+      streamInfo.status = "cancelled";
+    }
+  },
+
+  isStreaming(browser) {
+    const key = browser.permanentKey || browser;
+    const streamInfo = this.activeStreams.get(key);
+    return streamInfo && streamInfo.status === "streaming";
+  },
 };
 
 /**
@@ -436,4 +626,99 @@ export const SmartAssistEngine = {
       throw error;
     }
   },
+
+  /**
+   * Get conversation history for a specific tab
+   *
+   * @param {object} browser - The browser element for the tab
+   * @returns {Array} Conversation messages
+   */
+  getConversation(browser) {
+    return ConversationManager.getConversation(browser);
+  },
+
+  /**
+   * Update conversation history for a specific tab
+   *
+   * @param {object} browser - The browser element for the tab
+   * @param {Array} messages - Conversation messages
+   */
+  updateConversation(browser, messages) {
+    ConversationManager.updateConversation(browser, messages);
+  },
+
+  /**
+   * Clear conversation history for a specific tab
+   *
+   * @param {object} browser - The browser element for the tab
+   */
+  clearConversation(browser) {
+    ConversationManager.clearConversation(browser);
+  },
+
+  /**
+   * Start streaming assistant response in background
+   *
+   * @param {object} browser - The browser element for the tab
+   * @param {string} userMessage - User's message
+   * @returns {Promise<object>} Status object
+   */
+  startStream(browser, userMessage) {
+    return StreamManager.startStream(browser, userMessage);
+  },
+
+  /**
+   * Add observer to receive streaming updates for a tab
+   *
+   * @param {object} browser - The browser element for the tab
+   * @param {Function} callback - Callback function for updates
+   */
+  addStreamObserver(browser, callback) {
+    StreamManager.addObserver(browser, callback);
+  },
+
+  /**
+   * Remove observer for a tab
+   *
+   * @param {object} browser - The browser element for the tab
+   */
+  removeStreamObserver(browser) {
+    StreamManager.removeObserver(browser);
+  },
+
+  /**
+   * Check if a tab is currently streaming
+   *
+   * @param {object} browser - The browser element for the tab
+   * @returns {boolean} True if streaming
+   */
+  isStreaming(browser) {
+    return StreamManager.isStreaming(browser);
+  },
+
+  /**
+   * Cancel active stream for a tab
+   *
+   * @param {object} browser - The browser element for the tab
+   */
+  cancelStream(browser) {
+    StreamManager.cancelStream(browser);
+  },
 };
+
+// Cleanup conversations and streams when tabs are closed
+Services.obs.addObserver(
+  {
+    observe(subject, topic) {
+      if (topic === "tabdetached") {
+        const browser = subject.linkedBrowser;
+        if (browser) {
+          ConversationManager.clearConversation(browser);
+          StreamManager.cancelStream(browser);
+          StreamManager.removeObserver(browser);
+        }
+      }
+    },
+  },
+  "tabdetached"
+);
