@@ -33,16 +33,13 @@ export class SmartAssist extends MozLitElement {
     overrideNewTab: { type: Boolean },
     showLog: { type: Boolean },
     actionKey: { type: String }, // "chat" | "search"
+    _isStreaming: { type: Boolean },
   };
 
   constructor() {
     super();
     this.userPrompt = "";
-    // TODO the conversation state will evenually need to be stored in a "higher" location
-    // then just the state of this lit component. This is a Stub to get the convo started for now
-    this.conversationState = [
-      { role: "system", content: "You are a helpful assistant" },
-    ];
+    this.conversationState = [];
     this.logState = [];
     this.showLog = false;
     this.mode = "sidebar";
@@ -50,6 +47,10 @@ export class SmartAssist extends MozLitElement {
       "browser.ml.smartAssist.overrideNewTab"
     );
     this.actionKey = ACTION_CHAT;
+    this._currentBrowser = null;
+    this._streamObserver = null;
+    this._isStreaming = false;
+    this._tabSelectListener = null;
     this._actions = {
       [ACTION_CHAT]: {
         label: "Submit",
@@ -66,10 +67,141 @@ export class SmartAssist extends MozLitElement {
 
   connectedCallback() {
     super.connectedCallback();
+
+    // Get browser for the current tab
+    this._currentBrowser = this._getBrowserForTab();
+
+    // Load conversation for this browser/tab
+    if (this._currentBrowser) {
+      this._loadConversationForBrowser(this._currentBrowser);
+    }
+
+    // Set up tab switch listener
+    this._tabSelectListener = () => {
+      const newBrowser = this._getBrowserForTab();
+      if (newBrowser && newBrowser !== this._currentBrowser) {
+        // Unsubscribe from old browser's stream
+        if (this._currentBrowser) {
+          lazy.SmartAssistEngine.removeStreamObserver(this._currentBrowser);
+        }
+
+        // Switch to new browser
+        this._currentBrowser = newBrowser;
+        this._loadConversationForBrowser(newBrowser);
+      }
+    };
+
+    const gBrowser = window.browsingContext.topChromeWindow.gBrowser;
+    if (gBrowser?.tabContainer) {
+      gBrowser.tabContainer.addEventListener("TabSelect", this._tabSelectListener);
+    }
+
     if (this.mode === "sidebar" && this.overrideNewTab) {
       this._applyNewTabOverride(true);
     }
   }
+
+  /**
+   * Cleanup when component is disconnected
+   */
+  disconnectedCallback() {
+    super.disconnectedCallback();
+
+    // Remove stream observer for current browser
+    if (this._currentBrowser) {
+      lazy.SmartAssistEngine.removeStreamObserver(this._currentBrowser);
+    }
+
+    // Remove tab select listener
+    if (this._tabSelectListener) {
+      const gBrowser = window.browsingContext.topChromeWindow.gBrowser;
+      if (gBrowser?.tabContainer) {
+        gBrowser.tabContainer.removeEventListener("TabSelect", this._tabSelectListener);
+      }
+      this._tabSelectListener = null;
+    }
+
+    this._currentBrowser = null;
+  }
+
+  /**
+   * Get the browser element for the currently selected tab
+   *
+   * @returns {Browser} The browser element
+   */
+  _getBrowserForTab() {
+    const topWindow = window.browsingContext.topChromeWindow;
+    return topWindow?.gBrowser?.selectedBrowser;
+  }
+
+  /**
+   * Load conversation state for a specific browser/tab
+   *
+   * @param {Browser} browser - The browser element to load conversation for
+   */
+  _loadConversationForBrowser(browser) {
+    if (!browser) {
+      return;
+    }
+
+    // Get conversation from engine
+    const conversation = lazy.SmartAssistEngine.getConversation(browser);
+    this.conversationState = conversation || [];
+
+    // Subscribe to stream updates for this browser
+    lazy.SmartAssistEngine.addStreamObserver(browser, this._handleStreamUpdate.bind(this));
+
+    // Check if currently streaming
+    this._isStreaming = lazy.SmartAssistEngine.isStreaming(browser);
+
+    // Request update to refresh UI
+    this.requestUpdate?.();
+  }
+
+  /**
+   * Handle streaming updates from the engine
+   *
+   * @param {object} update - The update object from streaming
+   * @param {string} update.type - Type of update: 'text', 'tool_call', 'complete', 'error'
+   */
+  _handleStreamUpdate = update => {
+    if (!this._currentBrowser) {
+      return;
+    }
+
+    switch (update.type) {
+      case "text":
+        // Reload conversation to get updated content
+        const conversation = lazy.SmartAssistEngine.getConversation(this._currentBrowser);
+        this.conversationState = conversation || [];
+        this.requestUpdate?.();
+        break;
+
+      case "tool_call":
+        // Add tool call to log
+        if (update.data) {
+          this._updatelogState({
+            content: update.data.content,
+            result: update.data.result || "No result",
+          });
+        }
+        break;
+
+      case "complete":
+        this._isStreaming = false;
+        // Final reload to ensure we have complete conversation
+        const finalConversation = lazy.SmartAssistEngine.getConversation(this._currentBrowser);
+        this.conversationState = finalConversation || [];
+        this.requestUpdate?.();
+        break;
+
+      case "error":
+        this._isStreaming = false;
+        console.error("Stream error:", update.error);
+        this.requestUpdate?.();
+        break;
+    }
+  };
 
   /**
    * Adds a new message to the conversation history.
@@ -159,43 +291,32 @@ export class SmartAssist extends MozLitElement {
       return;
     }
 
-    // Push user prompt
-    this._updateConversationState({ role: "user", content: formattedPrompt });
+    // Clear the input immediately
     this.userPrompt = "";
 
-    // Create an empty assistant placeholder.
-    this._updateConversationState({ role: "assistant", content: "" });
-    const latestAssistantMessageIndex = this.conversationState.length - 1;
+    if (!this._currentBrowser) {
+      console.error("No current browser available for chat");
+      return;
+    }
 
-    let acc = "";
     try {
-      const stream = lazy.SmartAssistEngine.fetchWithHistory(
-        this.conversationState
+      // Set streaming flag
+      this._isStreaming = true;
+
+      // Start the stream via the engine
+      // The stream will run in the background and notify us via _handleStreamUpdate
+      await lazy.SmartAssistEngine.startStream(
+        this._currentBrowser,
+        formattedPrompt
       );
 
-      for await (const chunk of stream) {
-        // Check to see if chunk is special tool calling log and add to logState
-        if (chunk.type === "tool_call_log") {
-          this._updatelogState({
-            content: chunk.content,
-            result: chunk.result || "No result",
-          });
-          continue;
-        }
-        acc += chunk;
-        // append to the latest assistant message
-
-        this.conversationState[latestAssistantMessageIndex] = {
-          ...this.conversationState[latestAssistantMessageIndex],
-          content: acc,
-        };
-        this.requestUpdate?.();
-      }
-    } catch (e) {
-      this.conversationState[latestAssistantMessageIndex] = {
-        role: "assistant",
-        content: `There was an error`,
-      };
+      // Immediately reload conversation to show user message
+      const conversation = lazy.SmartAssistEngine.getConversation(this._currentBrowser);
+      this.conversationState = conversation || [];
+      this.requestUpdate?.();
+    } catch (error) {
+      console.error("Failed to start chat stream:", error);
+      this._isStreaming = false;
       this.requestUpdate?.();
     }
   };
