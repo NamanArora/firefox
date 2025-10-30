@@ -32,6 +32,79 @@ const toolsConfig = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "click_element",
+      description:
+        "Clicks an element on the current web page using a CSS selector",
+      parameters: {
+        type: "object",
+        properties: {
+          selector: {
+            type: "string",
+            description:
+              "CSS selector for the element to click (e.g., 'button#submit', '.nav-link')",
+          },
+        },
+        required: ["selector"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_page_forms",
+      description:
+        "Get all forms and input fields on the current page with their metadata, including selectors, types, labels, and placeholders",
+      parameters: {
+        type: "object",
+        properties: {},
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "fill_input",
+      description:
+        "Fill a specific input field on the page with the provided text value",
+      parameters: {
+        type: "object",
+        properties: {
+          selector: {
+            type: "string",
+            description:
+              "CSS selector for the input element to fill (e.g., 'input[name=\"email\"]', '#search-box')",
+          },
+          value: {
+            type: "string",
+            description: "The text value to fill into the input field",
+          },
+        },
+        required: ["selector", "value"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "navigate_to_url",
+      description:
+        "Navigate to a URL in the current tab. Handles partial URLs (e.g., 'youtube', 'youtube.com') and full URLs (e.g., 'https://youtube.com'). Use this to open websites before interacting with them.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: {
+            type: "string",
+            description:
+              "The URL to navigate to. Can be partial (e.g., 'youtube') or complete (e.g., 'https://youtube.com')",
+          },
+        },
+        required: ["url"],
+      },
+    },
+  },
 ];
 
 /**
@@ -59,11 +132,140 @@ const search_open_tabs = ({ type }) => {
 };
 
 /**
+ * Clicks an element on the current page using a CSS selector
+ *
+ * @param {object} args.selector - CSS selector for the element to click
+ * @returns {object} Result with success status and details
+ */
+const click_element = async ({ selector }) => {
+  try {
+    let win = lazy.BrowserWindowTracker.getTopWindow();
+    let browser = win.gBrowser.selectedBrowser;
+
+    // Send message to content process to perform click
+    const result = await browser.browsingContext?.currentWindowContext
+      .getActor("GenAI")
+      .sendQuery("ClickElement", { selector });
+
+    return result;
+  } catch (error) {
+    return {
+      success: false,
+      error: `Failed to click element: ${error.message}`,
+    };
+  }
+};
+
+/**
+ * Get all forms and input fields on the current page
+ *
+ * @returns {object} Forms data with inputs and buttons
+ */
+const get_page_forms = async () => {
+  try {
+    let win = lazy.BrowserWindowTracker.getTopWindow();
+    let browser = win.gBrowser.selectedBrowser;
+
+    // Send message to content process to get forms data
+    const result = await browser.browsingContext?.currentWindowContext
+      .getActor("GenAI")
+      .sendQuery("GetPageForms");
+
+    return result;
+  } catch (error) {
+    return {
+      success: false,
+      error: `Failed to get page forms: ${error.message}`,
+      forms: [],
+    };
+  }
+};
+
+/**
+ * Fill an input field with the provided value
+ *
+ * @param {object} args.selector - CSS selector for the input element
+ * @param {object} args.value - Text value to fill
+ * @returns {object} Result with success status
+ */
+const fill_input = async ({ selector, value }) => {
+  try {
+    let win = lazy.BrowserWindowTracker.getTopWindow();
+    let browser = win.gBrowser.selectedBrowser;
+
+    // Send message to content process to fill input
+    const result = await browser.browsingContext?.currentWindowContext
+      .getActor("GenAI")
+      .sendQuery("FillInput", { selector, value });
+
+    return result;
+  } catch (error) {
+    return {
+      success: false,
+      error: `Failed to fill input: ${error.message}`,
+    };
+  }
+};
+
+/**
+ * Navigate to a URL in the current tab
+ *
+ * @param {object} args.url - URL to navigate to (can be partial)
+ * @returns {object} Result with success status and normalized URL
+ */
+const navigate_to_url = ({ url }) => {
+  try {
+    let win = lazy.BrowserWindowTracker.getTopWindow();
+    let browser = win.gBrowser.selectedBrowser;
+
+    // Use Firefox's built-in URL fixup to handle partial URLs
+    let fixupInfo;
+    try {
+      fixupInfo = Services.uriFixup.getFixupURIInfo(
+        url,
+        Services.uriFixup.FIXUP_FLAG_NONE
+      );
+    } catch (e) {
+      return {
+        success: false,
+        error: `Invalid URL: ${url}`,
+      };
+    }
+
+    const fixedUrl = fixupInfo.preferredURI.spec;
+
+    // Navigate in current tab
+    const options = {
+      triggeringPrincipal:
+        Services.scriptSecurityManager.createNullPrincipal({}),
+    };
+
+    browser.fixupAndLoadURIString(url, options);
+
+    return {
+      success: true,
+      originalUrl: url,
+      navigatedTo: fixedUrl,
+      message: `Navigating to ${fixedUrl}`,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Failed to navigate: ${error.message}`,
+    };
+  }
+};
+
+/**
  * Smart Assist Engine
  */
 export const SmartAssistEngine = {
   toolMap: {
     search_open_tabs,
+    click_element,
+    get_page_forms,
+    fill_input,
+    navigate_to_url,
   },
 
   /**
@@ -219,6 +421,7 @@ export const SmartAssistEngine = {
    */
 
   async getPromptIntent(query) {
+    return "chat";
     try {
       const engine = await this._createEngine({
         featureId: "smart-intent",
